@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,43 +29,19 @@ func TestValidateNoulFlags(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "no subject",
+			name:    "question empty",
 			setup:   func() {},
-			wantErr: "one of --image, --file, or --prompt is required",
+			wantErr: "--question must not be empty",
 		},
 		{
-			name:  "prompt only",
-			setup: func() { noulFlags.prompt = "hello" },
-		},
-		{
-			name:  "image only",
-			setup: func() { noulFlags.image = "a.jpg" },
-		},
-		{
-			name:  "file only",
-			setup: func() { noulFlags.file = "a.txt" },
-		},
-		{
-			name: "image and file",
-			setup: func() {
-				noulFlags.image = "a.jpg"
-				noulFlags.file = "a.txt"
-			},
-			wantErr: "mutually exclusive",
-		},
-		{
-			name: "all three",
-			setup: func() {
-				noulFlags.image = "a.jpg"
-				noulFlags.file = "a.txt"
-				noulFlags.prompt = "hello"
-			},
-			wantErr: "mutually exclusive",
+			name:    "question whitespace",
+			setup:   func() { noulFlags.question = "   " },
+			wantErr: "--question must not be empty",
 		},
 		{
 			name: "threshold below range",
 			setup: func() {
-				noulFlags.prompt = "hello"
+				noulFlags.question = "q"
 				noulFlags.threshold = -0.1
 			},
 			wantErr: "--threshold must be between 0 and 1",
@@ -74,22 +49,19 @@ func TestValidateNoulFlags(t *testing.T) {
 		{
 			name: "threshold above range",
 			setup: func() {
-				noulFlags.prompt = "hello"
+				noulFlags.question = "q"
 				noulFlags.threshold = 1.1
 			},
 			wantErr: "--threshold must be between 0 and 1",
 		},
 		{
-			name: "threshold zero valid",
-			setup: func() {
-				noulFlags.prompt = "hello"
-				noulFlags.threshold = 0
-			},
+			name:  "threshold zero valid",
+			setup: func() { noulFlags.question = "q" },
 		},
 		{
 			name: "threshold one valid",
 			setup: func() {
-				noulFlags.prompt = "hello"
+				noulFlags.question = "q"
 				noulFlags.threshold = 1
 			},
 		},
@@ -98,8 +70,6 @@ func TestValidateNoulFlags(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			resetNoulFlags()
-			noulFlags.model = "m"
-			noulFlags.statement = "s"
 			tc.setup()
 			err := validateNoulFlags()
 			if tc.wantErr == "" {
@@ -115,52 +85,11 @@ func TestValidateNoulFlags(t *testing.T) {
 	}
 }
 
-func TestResolveHost(t *testing.T) {
-	t.Cleanup(resetNoulFlags)
-
-	t.Setenv("OLLAMA_HOST", "http://envhost:1234")
-	noulFlags.host = ""
-	if got := resolveHost(); got != "http://envhost:1234" {
-		t.Errorf("env host: resolveHost() = %q", got)
-	}
-
-	noulFlags.host = "http://flaghost:5678"
-	if got := resolveHost(); got != "http://flaghost:5678" {
-		t.Errorf("flag host: resolveHost() = %q", got)
-	}
-
-	t.Setenv("OLLAMA_HOST", "")
-	noulFlags.host = "127.0.0.1:11434"
-	if got := resolveHost(); got != "http://127.0.0.1:11434" {
-		t.Errorf("scheme-less host: resolveHost() = %q", got)
-	}
-
-	noulFlags.host = ""
-	if got := resolveHost(); got != defaultHost {
-		t.Errorf("default host: resolveHost() = %q, want %q", got, defaultHost)
-	}
-}
-
-func captureStdout(t *testing.T, fn func() error) (string, error) {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stdout = w
-	fnErr := fn()
-	os.Stdout = orig
-	_ = w.Close()
-	data, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read pipe: %v", err)
-	}
-	return string(data), fnErr
-}
-
 func TestRunNoul(t *testing.T) {
-	t.Cleanup(resetNoulFlags)
+	t.Cleanup(func() {
+		resetNoulFlags()
+		resetSubjectFlags()
+	})
 
 	imagePath := filepath.Join(t.TempDir(), "img.png")
 	imageBytes := []byte{0x89, 0x50, 0x4e, 0x47}
@@ -173,10 +102,12 @@ func TestRunNoul(t *testing.T) {
 	}
 
 	baseSetup := func(host string) {
-		noulFlags.model = "clef-flash:9b"
-		noulFlags.statement = "the input is written in English"
-		noulFlags.host = host
-		noulFlags.timeout = 5 * time.Second
+		resetNoulFlags()
+		resetSubjectFlags()
+		subjectFlags.model = "clef-flash:9b"
+		subjectFlags.host = host
+		subjectFlags.timeout = 5 * time.Second
+		noulFlags.question = "the input is written in English"
 		noulFlags.threshold = 0.5
 	}
 
@@ -193,7 +124,7 @@ func TestRunNoul(t *testing.T) {
 			name: "prompt judged true",
 			setup: func(host string) {
 				baseSetup(host)
-				noulFlags.prompt = "Hello world"
+				subjectFlags.prompt = "Hello world"
 			},
 			respBody: `{"model":"clef-flash:9b","answers":{"statement":{"type":"noul","noul":0.9}},"usage":{"input_tokens":1,"output_tokens":0}}`,
 			wantOut:  "true\n",
@@ -217,7 +148,7 @@ func TestRunNoul(t *testing.T) {
 			name: "text file judged true",
 			setup: func(host string) {
 				baseSetup(host)
-				noulFlags.file = filePath
+				subjectFlags.file = filePath
 			},
 			respBody: `{"model":"clef-flash:9b","answers":{"statement":{"type":"noul","noul":0.95}},"usage":{"input_tokens":1,"output_tokens":0}}`,
 			wantOut:  "true\n",
@@ -231,7 +162,7 @@ func TestRunNoul(t *testing.T) {
 			name: "image judged false",
 			setup: func(host string) {
 				baseSetup(host)
-				noulFlags.image = imagePath
+				subjectFlags.image = imagePath
 			},
 			respBody:  `{"model":"clef-flash:9b","answers":{"statement":{"type":"noul","noul":0.005}},"usage":{"input_tokens":1,"output_tokens":0}}`,
 			wantOut:   "false\n",
@@ -250,7 +181,7 @@ func TestRunNoul(t *testing.T) {
 			name: "threshold above score",
 			setup: func(host string) {
 				baseSetup(host)
-				noulFlags.prompt = "Hello world"
+				subjectFlags.prompt = "Hello world"
 				noulFlags.threshold = 0.95
 			},
 			respBody:  `{"model":"clef-flash:9b","answers":{"statement":{"type":"noul","noul":0.9}},"usage":{"input_tokens":1,"output_tokens":0}}`,
@@ -261,7 +192,7 @@ func TestRunNoul(t *testing.T) {
 			name: "missing answer",
 			setup: func(host string) {
 				baseSetup(host)
-				noulFlags.prompt = "Hello world"
+				subjectFlags.prompt = "Hello world"
 			},
 			respBody:   `{"model":"clef-flash:9b","answers":{},"usage":{"input_tokens":1,"output_tokens":0}}`,
 			wantErrAny: true,
@@ -270,7 +201,6 @@ func TestRunNoul(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetNoulFlags()
 			var captured ollama.SystemOneRequest
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {

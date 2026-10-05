@@ -15,12 +15,79 @@ import (
 // maxResponseBytes caps how much of an Ollama response is read.
 const maxResponseBytes = 16 << 20 // 16 MiB
 
+// CriteriaMap is a string map that preserves insertion order when marshaled
+// to JSON. System One breaks choice ties by option order, so criteria must
+// keep the order options were given instead of Go's alphabetical map sort.
+type CriteriaMap struct {
+	keys []string
+	vals map[string]string
+}
+
+// NewCriteriaMap returns an empty ordered criteria map.
+func NewCriteriaMap() *CriteriaMap {
+	return &CriteriaMap{vals: make(map[string]string)}
+}
+
+// Set adds a key, or replaces its value while keeping its original position.
+func (m *CriteriaMap) Set(key, value string) {
+	if !m.Has(key) {
+		m.keys = append(m.keys, key)
+	}
+	m.vals[key] = value
+}
+
+// Has reports whether the key exists.
+func (m *CriteriaMap) Has(key string) bool {
+	_, ok := m.vals[key]
+	return ok
+}
+
+// Len returns the number of entries.
+func (m *CriteriaMap) Len() int {
+	return len(m.keys)
+}
+
+// Keys returns the keys in insertion order.
+func (m *CriteriaMap) Keys() []string {
+	return append([]string(nil), m.keys...)
+}
+
+// Get returns the description for a key.
+func (m *CriteriaMap) Get(key string) string {
+	return m.vals[key]
+}
+
+// MarshalJSON encodes the map as a JSON object in insertion order.
+func (m *CriteriaMap) MarshalJSON() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, k := range m.keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		keyJSON, err := json.Marshal(k)
+		if err != nil {
+			return nil, err
+		}
+		valJSON, err := json.Marshal(m.vals[k])
+		if err != nil {
+			return nil, err
+		}
+		b.Write(keyJSON)
+		b.WriteByte(':')
+		b.Write(valJSON)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
+}
+
 // SystemOneQuestion describes one typed question in a System One request.
-// Type "noul" requires only instructions; "choice" and "score" questions
-// add criteria fields when the client grows to support them.
+// Type "noul" needs only instructions. "choice" also requires Criteria as
+// a *CriteriaMap and "score" as a []string of ordered level descriptions.
 type SystemOneQuestion struct {
 	Type         string `json:"type"`
 	Instructions string `json:"instructions"`
+	Criteria     any    `json:"criteria,omitempty"`
 }
 
 // SystemOneRequest describes a /v1/systemone call (Ollama v0.35+).
@@ -33,11 +100,18 @@ type SystemOneRequest struct {
 	Questions map[string]SystemOneQuestion `json:"questions"`
 }
 
-// SystemOneAnswer is the typed answer to one question. For noul questions,
-// Noul holds the probability of true, from 0 to 1.
+// SystemOneAnswer is the typed answer to one question. The Type field
+// discriminates which fields carry data: noul answers fill Noul, choice
+// answers fill Choice/Probabilities/Confidence, and score answers fill
+// Score/Legend/Probabilities/Confidence.
 type SystemOneAnswer struct {
-	Type string  `json:"type"`
-	Noul float64 `json:"noul"`
+	Type          string             `json:"type"`
+	Noul          float64            `json:"noul"`
+	Choice        string             `json:"choice"`
+	Score         float64            `json:"score"`
+	Probabilities map[string]float64 `json:"probabilities"`
+	Legend        map[string]string  `json:"legend"`
+	Confidence    float64            `json:"confidence"`
 }
 
 // SystemOneResponse holds the answers and token usage for a System One call.
